@@ -1,8 +1,8 @@
-// Discord Quest Manager - Ultimate Auto-Completer (Custom Color & Clear Icon)
+// Discord Quest Manager - Ultimate Auto-Completer (Inline Modal & Quest Update)
 // Run this in Discord's DevTools Console (Ctrl+Shift+I)
 
 (async () => {
-  const VERSION = "7.5.0-CUSTOM-COLOR";
+  const VERSION = "7.8.0-INLINE-UPDATE";
   const AUTHOR = "Nobody";
 
   // Cleanup previous instance
@@ -40,7 +40,6 @@
     return false;
   };
 
-  // Discord may expose UserStore directly or inside default/named exports.
   const findUserStore = () => {
     const seen = new WeakSet();
     const visit = (value, depth = 0) => {
@@ -87,7 +86,6 @@
       return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.${format}?size=256`;
     }
 
-    // Discord's default avatar when the account has no custom avatar.
     const discriminator = Number(user.discriminator);
     const defaultIndex = user.discriminator && user.discriminator !== "0"
       ? discriminator % 5
@@ -108,7 +106,7 @@
 
   // --- Settings State ---
   const settings = {
-    theme: "#8b0000", // Default Dark Red
+    theme: "#8b0000",
     size: 420,
     fabSize: 64,
   };
@@ -150,9 +148,7 @@
     .header-icon { width: 24px; height: 24px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); flex-shrink: 0; object-fit: cover; }
     
     .header-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-left: auto; }
-    
     .author { font-size: 14px; color: #a5b4fc; font-weight: 800; white-space: nowrap; text-shadow: 0 0 10px rgba(165, 180, 252, 0.3); letter-spacing: 0.5px; }
-    
     .header-controls { display: flex; align-items: center; gap: 6px; }
     
     .win-btn { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.05); color: #dbdee1; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: 0.2s; flex-shrink: 0; }
@@ -191,6 +187,7 @@
     .btn-start { background: var(--accent-color); border: none; }
     .btn-stop { background: rgba(218, 55, 60, 0.1); border: 1px solid rgba(218, 55, 60, 0.3); color: #ff4757; }
     .btn-all { background: rgba(88, 101, 242, 0.2); border: 1px solid rgba(88, 101, 242, 0.4); color: #a5b4fc; }
+    .btn-update { background: linear-gradient(135deg, #10ac84, #1dd1a1); border: none; }
     
     /* Settings Modal */
     .modal-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); z-index: 100; display: none; align-items: center; justify-content: center; }
@@ -200,61 +197,41 @@
     .setting-group { margin-bottom: 15px; }
     .setting-group label { display: block; margin-bottom: 5px; color: #b5bac1; font-size: 12px; }
     
-    /* Color Wheel Input */
-    input[type="color"] {
-      -webkit-appearance: none;
-      -moz-appearance: none;
-      appearance: none;
-      width: 100%;
-      height: 40px;
-      background-color: transparent;
-      border: none;
-      cursor: pointer;
-    }
-    input[type="color"]::-webkit-color-swatch-wrapper {
-      padding: 0;
-    }
-    input[type="color"]::-webkit-color-swatch {
-      border: 2px solid rgba(255,255,255,0.2);
-      border-radius: 8px;
-    }
-
+    input[type="color"] { -webkit-appearance: none; appearance: none; width: 100%; height: 40px; background-color: transparent; border: none; cursor: pointer; }
+    input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+    input[type="color"]::-webkit-color-swatch { border: 2px solid rgba(255,255,255,0.2); border-radius: 8px; }
     input[type="range"] { width: 100%; margin-top: 5px; accent-color: var(--accent-color); }
+    
     .modal-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
     .modal-actions button { background: var(--accent-color); border: none; padding: 8px 16px; }
     
     .log { max-height: 80px; overflow-y: auto; padding: 10px; background: rgba(0,0,0,0.5); font-family: monospace; font-size: 11px; border-top: 1px solid rgba(255,255,255,0.04); }
-    .log-entry { color: #b5bac1; }
+    .log-entry { color: #b5bac1; padding: 2px 0;}
     .log-entry.success { color: #1dd1a1; }
     .log-entry.error { color: #ff4757; }
+    .log-entry.warn { color: #feca57; }
     
-    /* Floating Action Button (Minimized Icon) - Made completely clear */
+    /* Floating Action Button */
     .fab {
       position: fixed; left: 0; top: 0; width: ${settings.fabSize}px; height: ${settings.fabSize}px;
       background-image: url('${avatarUrl}'); background-size: cover; background-position: center;
       border-radius: 50%; border: 2px solid var(--accent-color); cursor: grab;
-      z-index: 2147483646; display: none; 
-      /* Removed box-shadow and blurs to make the image crystal clear */
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3); 
-      transition: width 0.2s, height 0.2s;
-      touch-action: none; user-select: none;
-      will-change: transform;
-      image-rendering: -webkit-optimize-contrast; /* Improves image clarity */
+      z-index: 2147483646; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.3); 
+      transition: width 0.2s, height 0.2s; touch-action: none; user-select: none; will-change: transform;
+      image-rendering: -webkit-optimize-contrast;
     }
     .fab:active { cursor: grabbing; }
-    
     .fab-badge { position: absolute; bottom: 0; right: 0; background: var(--accent-color); color: white; font-size: 10px; padding: 2px 6px; border-radius: 10px; font-weight: bold; border: 2px solid #1e1f22; pointer-events: none; }
 
-    /* Close Confirmation Modal */
+    /* Custom Close Modal (Now inside Panel) */
     .close-modal-overlay {
-      position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6);
-      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-      z-index: 2147483648; display: none; align-items: center; justify-content: center;
-      opacity: 0; transition: opacity 0.2s ease;
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(4px); z-index: 9999; display: none; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 0.2s ease; border-radius: 20px;
     }
     .close-modal-overlay.show { display: flex; opacity: 1; }
     .close-modal-box {
-      background: #313338; padding: 24px; border-radius: 12px; width: 400px; max-width: 90%;
+      background: #313338; padding: 24px; border-radius: 12px; width: 90%; max-width: 340px;
       box-shadow: 0 20px 50px rgba(0,0,0,0.8); text-align: center;
       transform: scale(0.95); transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
     }
@@ -262,14 +239,9 @@
     .close-modal-box h2 { margin: 0 0 12px 0; color: #f2f3f5; font-size: 20px; font-weight: 700; }
     .close-modal-box p { color: #b5bac1; font-size: 14px; margin: 0 0 24px 0; line-height: 1.5; }
     .close-modal-actions { display: flex; gap: 12px; }
-    .close-modal-actions button {
-      flex: 1; padding: 12px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;
-      border: none; transition: 0.2s;
-    }
+    .close-modal-actions button { flex: 1; padding: 12px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; border: none; transition: 0.2s; }
     .close-modal-actions .btn-cancel { background: #4e5058; color: #fff; }
-    .close-modal-actions .btn-cancel:hover { background: #6d6f78; }
     .close-modal-actions .btn-confirm { background: #da373c; color: #fff; }
-    .close-modal-actions .btn-confirm:hover { background: #a12828; }
   </style>
   
   <div class="panel" id="panel" style="--accent-color: ${settings.theme};">
@@ -296,6 +268,7 @@
       </div>
       <div class="btn-row">
         <button id="stopAll" class="btn-stop">■ Stop All</button>
+        <button id="updateBtn" class="btn-update">⟳ Update</button>
       </div>
     </div>
     
@@ -326,27 +299,28 @@
         </div>
       </div>
     </div>
+
+    <!-- Custom Close Confirmation Modal (Inside Panel) -->
+    <div class="close-modal-overlay" id="closeModalOverlay">
+      <div class="close-modal-box">
+        <h2>Close Quest Manager?</h2>
+        <p>Any running quests will be stopped immediately.</p>
+        <div class="close-modal-actions">
+          <button class="btn-cancel" id="modalCancel">Cancel</button>
+          <button class="btn-confirm" id="modalConfirm">Close</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="fab" id="fab" style="--accent-color: ${settings.theme}; width: ${settings.fabSize}px; height: ${settings.fabSize}px;">
     <div class="fab-badge" id="fabBadge"></div>
   </div>
-
-  <!-- Custom Close Confirmation Modal -->
-  <div class="close-modal-overlay" id="closeModalOverlay">
-    <div class="close-modal-box">
-      <h2>Close Quest Manager?</h2>
-      <p>Any running quests will be stopped immediately.</p>
-      <div class="close-modal-actions">
-        <button class="btn-cancel" id="modalCancel">Cancel</button>
-        <button class="btn-confirm" id="modalConfirm">Close</button>
-      </div>
-    </div>
-  </div>
   `;
 
   const $ = (id) => shadow.getElementById(id);
   const panel = $("panel"), header = $("header"), listEl = $("list"), logEl = $("log"), fab = $("fab");
+  const btnUpd = $("updateBtn");
   
   const refreshAccountAvatar = () => {
     const latestAvatar = resolveCurrentAvatar();
@@ -464,13 +438,13 @@
     el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
     logEl.appendChild(el);
     logEl.scrollTop = logEl.scrollHeight;
+    console.log(`[QM] ${msg}`);
   };
 
   // --- Settings Logic ---
   $("settingsBtn").addEventListener("click", () => $("settingsModal").classList.add("show"));
   $("closeSettings").addEventListener("click", () => $("settingsModal").classList.remove("show"));
 
-  // Color Picker (Wheel)
   $("colorPicker").addEventListener("input", (e) => {
     const color = e.target.value;
     settings.theme = color;
@@ -478,14 +452,12 @@
     fab.style.setProperty('--accent-color', color);
   });
 
-  // Panel Size
   $("panelSize").addEventListener("input", (e) => {
     settings.size = e.target.value;
     $("sizeVal").textContent = settings.size;
     panel.style.width = `${settings.size}px`;
   });
 
-  // Icon Size
   $("fabSize").addEventListener("input", (e) => {
     settings.fabSize = e.target.value;
     $("fabSizeVal").textContent = settings.fabSize;
@@ -515,6 +487,19 @@
         const taskKeys = Object.keys((q.config.taskConfig || q.config.taskConfigV2).tasks || {});
         if (!supportedTasks.some(t => taskKeys.includes(t))) return false;
         return true;
+      });
+    } catch { return []; }
+  };
+
+  const getUnenrolledQuests = () => {
+    try {
+      return [...QuestsStore.quests.values()].filter(q => {
+        if (!q || !q.config) return false;
+        if (q.userStatus?.completedAt) return false;
+        if (new Date(q.config.expiresAt).getTime() <= Date.now()) return false;
+        const taskKeys = Object.keys((q.config.taskConfig || q.config.taskConfigV2).tasks || {});
+        if (!supportedTasks.some(t => taskKeys.includes(t))) return false;
+        return !q.userStatus?.enrolledAt;
       });
     } catch { return []; }
   };
@@ -787,6 +772,67 @@
     render();
   };
 
+  // --- Enroll & Update Logic ---
+  const waitForEnroll = async (questId, maxWait = 5000) => {
+    const start = Date.now();
+    while (Date.now() - start < maxWait) {
+      const q = QuestsStore.quests.get(questId);
+      if (q?.userStatus?.enrolledAt) return q;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    const q = QuestsStore.quests.get(questId);
+    if (q) {
+      q.userStatus = { ...(q.userStatus || {}), enrolledAt: new Date().toISOString() };
+      return q;
+    }
+    return null;
+  };
+
+  const handleEnrollAndUpdate = async () => {
+    const unenrolled = getUnenrolledQuests();
+    
+    if (!unenrolled.length) {
+      log("No new quests available to enroll.", "info");
+      return;
+    }
+
+    btnUpd.disabled = true;
+    btnUpd.textContent = `⟳ Loading...`;
+
+    const total = unenrolled.length;
+    let enrolledCount = 0, playedCount = 0;
+
+    for (const q of unenrolled) {
+      const qName = q.config?.messages?.questName || q.id;
+      try {
+        await api.post({
+          url: `/quests/${q.id}/enroll`,
+          body: { location: 11, is_targeted: false, metadata_raw: null }
+        });
+        enrolledCount++;
+        log(`✅ Enrolled: ${qName}`, "success");
+
+        // Autoplay after enroll
+        const fresh = await waitForEnroll(q.id, 5000);
+        if (fresh && !activeJobs.has(fresh.id)) {
+          runJob(fresh);
+          playedCount++;
+          log(`▶ Auto-Play Started: ${qName}`, "info");
+        }
+      } catch (e) {
+        log(`❌ Failed to enroll ${qName}: ${e.message}`, "error");
+      }
+      await new Promise(r => setTimeout(r, 800));
+    }
+
+    btnUpd.disabled = false;
+    btnUpd.textContent = "⟳ Update";
+    log(`[DONE] ${enrolledCount}/${total} new quests enrolled, ${playedCount} started.`, "success");
+    render();
+  };
+
+  btnUpd.addEventListener("click", handleEnrollAndUpdate);
+
   setInterval(render, 2000);
   render();
 
@@ -817,6 +863,15 @@
     render();
   });
 
+  window.addEventListener("dc-quest-manager-cleanup", () => {
+    clearInterval(renderInterval);
+    activeJobs.forEach((job, id) => stopJob(id));
+    root.remove();
+  });
+
+  const renderInterval = setInterval(render, 2000);
+  render();
+
   log(`Quest Manager v${VERSION} loaded.`, "success");
-  log("Double-click minimized icon to restore.", "info");
+  log("Click 'Update' to enroll and start new quests.", "info");
 })();
