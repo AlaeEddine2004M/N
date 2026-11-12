@@ -1,0 +1,822 @@
+// Discord Quest Manager - Ultimate Auto-Completer (Custom Color & Clear Icon)
+// Run this in Discord's DevTools Console (Ctrl+Shift+I)
+
+(async () => {
+  const VERSION = "7.5.0-CUSTOM-COLOR";
+  const AUTHOR = "Nobody";
+
+  // Cleanup previous instance
+  window.dispatchEvent(new Event("dc-quest-manager-cleanup"));
+  document.getElementById("dc-quest-manager-root")?.remove();
+
+  // Discord Webpack Modules
+  let wpRequire = webpackChunkdiscord_app.push([[Symbol()], {}, r => r]);
+  webpackChunkdiscord_app.pop();
+  const findMod = (pred) => Object.values(wpRequire.c).find(x => pred(x))?.exports;
+
+  const ApplicationStreamingStore = findMod(x => x?.exports?.A?.__proto__?.getStreamerActiveStreamMetadata)?.A;
+  const RunningGameStore        = findMod(x => x?.exports?.Ay?.getRunningGames)?.Ay;
+  const QuestsStore             = findMod(x => x?.exports?.A?.__proto__?.getQuest)?.A;
+  const ChannelStore            = findMod(x => x?.exports?.A?.__proto__?.getAllThreadsForParent)?.A;
+  const GuildChannelStore       = findMod(x => x?.exports?.Ay?.getSFWDefaultChannel)?.Ay;
+  const FluxDispatcher          = findMod(x => x?.exports?.h?.__proto__?.flushWaitQueue)?.h;
+  const api                     = findMod(x => x?.exports?.Bo?.get)?.Bo;
+
+  if (!QuestsStore || !api) return alert("Modules not found. Make sure you are on Discord.");
+
+  const isApp = typeof DiscordNative !== "undefined";
+  const supportedTasks = ["WATCH_VIDEO", "PLAY_ON_DESKTOP", "STREAM_ON_DESKTOP", "PLAY_ACTIVITY", "WATCH_VIDEO_ON_MOBILE"];
+
+  // --- Current Discord Account Avatar ---
+  const hasMethod = (value, method) => {
+    let current = value;
+    for (let depth = 0; current && depth < 10; depth++) {
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(current, method);
+        if (typeof descriptor?.value === "function" || typeof descriptor?.get === "function") return true;
+        current = Object.getPrototypeOf(current);
+      } catch { break; }
+    }
+    return false;
+  };
+
+  // Discord may expose UserStore directly or inside default/named exports.
+  const findUserStore = () => {
+    const seen = new WeakSet();
+    const visit = (value, depth = 0) => {
+      if (!value || (typeof value !== "object" && typeof value !== "function") ||
+          seen.has(value) || depth > 3) return null;
+      seen.add(value);
+
+      if (hasMethod(value, "getCurrentUser")) {
+        try {
+          const user = value.getCurrentUser();
+          if (user?.id) return value;
+        } catch {}
+      }
+
+      let children = [];
+      try { children = Object.values(value); } catch {}
+      for (const child of children) {
+        const found = visit(child, depth + 1);
+        if (found) return found;
+      }
+      return null;
+    };
+
+    for (const module of Object.values(wpRequire.c)) {
+      const found = visit(module?.exports);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  const UserStore = findUserStore();
+
+  const avatarFromUser = user => {
+    if (!user?.id) return "";
+    try {
+      if (typeof user.getAvatarURL === "function") {
+        const url = user.getAvatarURL(null, 256, true);
+        if (typeof url === "string" && url) return url;
+      }
+    } catch {}
+
+    if (user.avatar) {
+      const format = user.avatar.startsWith("a_") ? "gif" : "png";
+      return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.${format}?size=256`;
+    }
+
+    // Discord's default avatar when the account has no custom avatar.
+    const discriminator = Number(user.discriminator);
+    const defaultIndex = user.discriminator && user.discriminator !== "0"
+      ? discriminator % 5
+      : Number((BigInt(user.id) >> 22n) % 6n);
+    return `https://cdn.discordapp.com/embed/avatars/${defaultIndex}.png`;
+  };
+
+  const resolveCurrentAvatar = () => {
+    try {
+      const user = UserStore?.getCurrentUser?.();
+      return avatarFromUser(user);
+    } catch {
+      return "";
+    }
+  };
+
+  let avatarUrl = resolveCurrentAvatar();
+
+  // --- Settings State ---
+  const settings = {
+    theme: "#8b0000", // Default Dark Red
+    size: 420,
+    fabSize: 64,
+  };
+
+  // --- Active Jobs Tracking ---
+  const activeJobs = new Map();
+  const selectedQuests = new Set();
+
+  // --- UI Creation ---
+  const root = document.createElement("div");
+  root.id = "dc-quest-manager-root";
+  document.body.appendChild(root);
+  const shadow = root.attachShadow({ mode: "open" });
+
+  shadow.innerHTML = `
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+    :host { all: initial; }
+    * { box-sizing: border-box; font-family: 'Inter', sans-serif; }
+    
+    .panel {
+      position: fixed; top: 0; left: 0; width: ${settings.size}px;
+      background: color-mix(in srgb, var(--accent-color) 15%, rgba(20, 21, 24, 0.95));
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      color: #f2f3f5; border-radius: 20px; display: flex; flex-direction: column;
+      box-shadow: 0 25px 60px rgba(0,0,0,0.8), inset 0 0 0 1px rgba(255,255,255,0.08);
+      z-index: 2147483647; overflow: hidden; font-size: 13px; will-change: transform, opacity;
+      transition: width 0.3s ease, background 0.3s ease;
+    }
+    
+    .header {
+      background: linear-gradient(90deg, rgba(255,255,255,0.05) 0%, transparent 100%);
+      padding: 14px 18px; display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 1px solid rgba(255,255,255,0.06); cursor: grab; user-select: none;
+    }
+    .header:active { cursor: grabbing; }
+    .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .header h1 { font-size: 16px; margin: 0; font-weight: 800; display: flex; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .header-icon { width: 24px; height: 24px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); flex-shrink: 0; object-fit: cover; }
+    
+    .header-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-left: auto; }
+    
+    .author { font-size: 14px; color: #a5b4fc; font-weight: 800; white-space: nowrap; text-shadow: 0 0 10px rgba(165, 180, 252, 0.3); letter-spacing: 0.5px; }
+    
+    .header-controls { display: flex; align-items: center; gap: 6px; }
+    
+    .win-btn { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.05); color: #dbdee1; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: 0.2s; flex-shrink: 0; }
+    .win-btn:hover { background: rgba(255,255,255,0.15); color: #fff; }
+    .win-btn.close:hover { background: #f23f42; color: #fff; }
+    
+    .body { padding: 16px; overflow-y: auto; flex: 1; max-height: 40vh; display: flex; flex-direction: column; gap: 10px; }
+    .body::-webkit-scrollbar { width: 6px; }
+    .body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
+    
+    .quest { background: rgba(255,255,255,0.03); border-radius: 12px; padding: 12px; border: 1px solid rgba(255,255,255,0.05); position: relative; display: flex; flex-direction: column; gap: 8px; transition: 0.2s; }
+    .quest::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--quest-color); border-radius: 12px 0 0 12px; }
+    .quest:hover { background: rgba(255,255,255,0.06); }
+    
+    .quest-main { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+    .quest input[type="checkbox"] { appearance: none; width: 20px; height: 20px; border: 2px solid rgba(255,255,255,0.2); border-radius: 6px; background: rgba(0,0,0,0.2); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s; flex-shrink: 0; margin: 0; }
+    .quest input[type="checkbox"]:checked { background: var(--accent-color); border-color: var(--accent-color); }
+    .quest input[type="checkbox"]::after { content: "✓"; color: white; font-size: 13px; font-weight: bold; opacity: 0; transform: scale(0.5); transition: 0.2s; }
+    .quest input[type="checkbox"]:checked::after { opacity: 1; transform: scale(1); }
+
+    .quest-info { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+    .quest-title { display: flex; justify-content: space-between; font-weight: 600; color: #fff; margin-bottom: 4px; }
+    .quest-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+    .task-badge { font-size: 10px; background: rgba(0,0,0,0.4); padding: 4px 8px; border-radius: 6px; color: var(--quest-color); text-transform: uppercase; white-space: nowrap; }
+    
+    .progress-container { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+    .progress-text { display: flex; justify-content: space-between; font-size: 11px; color: #b5bac1; font-weight: 600; }
+    .progress-bar-bg { width: 100%; height: 6px; background: rgba(0,0,0,0.4); border-radius: 10px; overflow: hidden; }
+    .progress-bar-fill { height: 100%; background: #1dd1a1; border-radius: 10px; width: 0%; transition: width 0.5s ease; box-shadow: 0 0 10px rgba(29, 209, 161, 0.5); }
+    
+    .controls { padding: 16px; border-top: 1px solid rgba(255,255,255,0.04); display: flex; flex-direction: column; gap: 10px; background: rgba(0,0,0,0.2); }
+    .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    button { background: rgba(255,255,255,0.05); color: #fff; border: 1px solid rgba(255,255,255,0.08); padding: 12px; border-radius: 10px; cursor: pointer; font-weight: 600; transition: 0.2s; display: flex; align-items: center; justify-content: center; gap: 6px; }
+    button:hover { background: rgba(255,255,255,0.1); transform: translateY(-1px); }
+    
+    .btn-start { background: var(--accent-color); border: none; }
+    .btn-stop { background: rgba(218, 55, 60, 0.1); border: 1px solid rgba(218, 55, 60, 0.3); color: #ff4757; }
+    .btn-all { background: rgba(88, 101, 242, 0.2); border: 1px solid rgba(88, 101, 242, 0.4); color: #a5b4fc; }
+    
+    /* Settings Modal */
+    .modal-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); z-index: 100; display: none; align-items: center; justify-content: center; }
+    .modal-overlay.show { display: flex; }
+    .modal { background: #1e1f22; padding: 20px; border-radius: 16px; width: 90%; border: 1px solid rgba(255,255,255,0.1); }
+    .modal h2 { margin: 0 0 15px 0; font-size: 16px; text-align: center; }
+    .setting-group { margin-bottom: 15px; }
+    .setting-group label { display: block; margin-bottom: 5px; color: #b5bac1; font-size: 12px; }
+    
+    /* Color Wheel Input */
+    input[type="color"] {
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 40px;
+      background-color: transparent;
+      border: none;
+      cursor: pointer;
+    }
+    input[type="color"]::-webkit-color-swatch-wrapper {
+      padding: 0;
+    }
+    input[type="color"]::-webkit-color-swatch {
+      border: 2px solid rgba(255,255,255,0.2);
+      border-radius: 8px;
+    }
+
+    input[type="range"] { width: 100%; margin-top: 5px; accent-color: var(--accent-color); }
+    .modal-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
+    .modal-actions button { background: var(--accent-color); border: none; padding: 8px 16px; }
+    
+    .log { max-height: 80px; overflow-y: auto; padding: 10px; background: rgba(0,0,0,0.5); font-family: monospace; font-size: 11px; border-top: 1px solid rgba(255,255,255,0.04); }
+    .log-entry { color: #b5bac1; }
+    .log-entry.success { color: #1dd1a1; }
+    .log-entry.error { color: #ff4757; }
+    
+    /* Floating Action Button (Minimized Icon) - Made completely clear */
+    .fab {
+      position: fixed; left: 0; top: 0; width: ${settings.fabSize}px; height: ${settings.fabSize}px;
+      background-image: url('${avatarUrl}'); background-size: cover; background-position: center;
+      border-radius: 50%; border: 2px solid var(--accent-color); cursor: grab;
+      z-index: 2147483646; display: none; 
+      /* Removed box-shadow and blurs to make the image crystal clear */
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3); 
+      transition: width 0.2s, height 0.2s;
+      touch-action: none; user-select: none;
+      will-change: transform;
+      image-rendering: -webkit-optimize-contrast; /* Improves image clarity */
+    }
+    .fab:active { cursor: grabbing; }
+    
+    .fab-badge { position: absolute; bottom: 0; right: 0; background: var(--accent-color); color: white; font-size: 10px; padding: 2px 6px; border-radius: 10px; font-weight: bold; border: 2px solid #1e1f22; pointer-events: none; }
+
+    /* Close Confirmation Modal */
+    .close-modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      z-index: 2147483648; display: none; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 0.2s ease;
+    }
+    .close-modal-overlay.show { display: flex; opacity: 1; }
+    .close-modal-box {
+      background: #313338; padding: 24px; border-radius: 12px; width: 400px; max-width: 90%;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.8); text-align: center;
+      transform: scale(0.95); transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    .close-modal-overlay.show .close-modal-box { transform: scale(1); }
+    .close-modal-box h2 { margin: 0 0 12px 0; color: #f2f3f5; font-size: 20px; font-weight: 700; }
+    .close-modal-box p { color: #b5bac1; font-size: 14px; margin: 0 0 24px 0; line-height: 1.5; }
+    .close-modal-actions { display: flex; gap: 12px; }
+    .close-modal-actions button {
+      flex: 1; padding: 12px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;
+      border: none; transition: 0.2s;
+    }
+    .close-modal-actions .btn-cancel { background: #4e5058; color: #fff; }
+    .close-modal-actions .btn-cancel:hover { background: #6d6f78; }
+    .close-modal-actions .btn-confirm { background: #da373c; color: #fff; }
+    .close-modal-actions .btn-confirm:hover { background: #a12828; }
+  </style>
+  
+  <div class="panel" id="panel" style="--accent-color: ${settings.theme};">
+    <div class="header" id="header">
+      <div class="header-left">
+        <h1><img src="${avatarUrl}" class="header-icon"> Quest Manager</h1>
+      </div>
+      <div class="header-right">
+        <span class="author">${AUTHOR}</span>
+        <div class="header-controls">
+          <button class="win-btn" id="settingsBtn" title="Settings">⚙️</button>
+          <button class="win-btn" id="minimizeBtn" title="Minimize">—</button>
+          <button class="win-btn close" id="closeBtn" title="Close">×</button>
+        </div>
+      </div>
+    </div>
+    
+    <div class="body" id="list"></div>
+    
+    <div class="controls">
+      <div class="btn-row">
+        <button id="startSelected" class="btn-start">▶ Selected</button>
+        <button id="startAll" class="btn-all">⚡ All Quests</button>
+      </div>
+      <div class="btn-row">
+        <button id="stopAll" class="btn-stop">■ Stop All</button>
+      </div>
+    </div>
+    
+    <div class="log" id="log"></div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settingsModal">
+      <div class="modal">
+        <h2>⚙️ Settings</h2>
+        
+        <div class="setting-group">
+          <label>Theme Color (Color Wheel)</label>
+          <input type="color" id="colorPicker" value="${settings.theme}">
+        </div>
+
+        <div class="setting-group">
+          <label>Panel Size: <span id="sizeVal">${settings.size}</span>px</label>
+          <input type="range" id="panelSize" min="300" max="600" value="${settings.size}">
+        </div>
+
+        <div class="setting-group">
+          <label>Icon Size: <span id="fabSizeVal">${settings.fabSize}</span>px</label>
+          <input type="range" id="fabSize" min="40" max="120" value="${settings.fabSize}">
+        </div>
+
+        <div class="modal-actions">
+          <button id="closeSettings">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="fab" id="fab" style="--accent-color: ${settings.theme}; width: ${settings.fabSize}px; height: ${settings.fabSize}px;">
+    <div class="fab-badge" id="fabBadge"></div>
+  </div>
+
+  <!-- Custom Close Confirmation Modal -->
+  <div class="close-modal-overlay" id="closeModalOverlay">
+    <div class="close-modal-box">
+      <h2>Close Quest Manager?</h2>
+      <p>Any running quests will be stopped immediately.</p>
+      <div class="close-modal-actions">
+        <button class="btn-cancel" id="modalCancel">Cancel</button>
+        <button class="btn-confirm" id="modalConfirm">Close</button>
+      </div>
+    </div>
+  </div>
+  `;
+
+  const $ = (id) => shadow.getElementById(id);
+  const panel = $("panel"), header = $("header"), listEl = $("list"), logEl = $("log"), fab = $("fab");
+  
+  const refreshAccountAvatar = () => {
+    const latestAvatar = resolveCurrentAvatar();
+    if (!latestAvatar) return;
+    if (latestAvatar !== avatarUrl) avatarUrl = latestAvatar;
+    fab.style.backgroundImage = `url("${avatarUrl}")`;
+    const headerAvatar = shadow.querySelector(".header-icon");
+    if (headerAvatar && headerAvatar.src !== avatarUrl) headerAvatar.src = avatarUrl;
+  };
+  
+  refreshAccountAvatar();
+  const avatarRefreshTimer = setInterval(refreshAccountAvatar, 3000);
+  window.addEventListener("dc-quest-manager-cleanup", () => clearInterval(avatarRefreshTimer), { once: true });
+  
+  // Dragging Variables
+  let panelX = window.innerWidth - settings.size - 20, panelY = 20;
+  let fabX = window.innerWidth - 100, fabY = 100;
+  let isPanelDragging = false, isFabDragging = false;
+  let startX, startY, initialX, initialY, hasMoved = false;
+
+  const updateTransforms = () => {
+    panel.style.transform = `translate3d(${panelX}px, ${panelY}px, 0)`;
+    fab.style.transform = `translate3d(${fabX}px, ${fabY}px, 0)`;
+  };
+  updateTransforms();
+
+  // Panel Drag
+  header.addEventListener("pointerdown", e => {
+    if (e.target.closest("button")) return;
+    isPanelDragging = true;
+    startX = e.clientX; startY = e.clientY;
+    initialX = panelX; initialY = panelY;
+    header.setPointerCapture(e.pointerId);
+  });
+  header.addEventListener("pointermove", e => {
+    if (!isPanelDragging) return;
+    panelX = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, initialX + e.clientX - startX));
+    panelY = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, initialY + e.clientY - startY));
+    panel.style.transform = `translate3d(${panelX}px, ${panelY}px, 0)`;
+  });
+  header.addEventListener("pointerup", e => {
+    isPanelDragging = false;
+    header.releasePointerCapture(e.pointerId);
+  });
+
+  // FAB Drag & Double Click
+  let clickCount = 0, clickTimer = null;
+  fab.addEventListener("pointerdown", e => {
+    isFabDragging = true; hasMoved = false;
+    startX = e.clientX; startY = e.clientY;
+    initialX = fabX; initialY = fabY;
+    fab.setPointerCapture(e.pointerId);
+  });
+  fab.addEventListener("pointermove", e => {
+    if (!isFabDragging) return;
+    hasMoved = true;
+    fabX = Math.max(0, Math.min(window.innerWidth - fab.offsetWidth, initialX + e.clientX - startX));
+    fabY = Math.max(0, Math.min(window.innerHeight - fab.offsetHeight, initialY + e.clientY - startY));
+    fab.style.transform = `translate3d(${fabX}px, ${fabY}px, 0)`;
+  });
+  fab.addEventListener("pointerup", e => {
+    isFabDragging = false;
+    fab.releasePointerCapture(e.pointerId);
+    if (!hasMoved) {
+      clickCount++;
+      if (clickCount === 1) {
+        clickTimer = setTimeout(() => { clickCount = 0; }, 300);
+      } else if (clickCount === 2) {
+        clearTimeout(clickTimer); clickCount = 0;
+        maximizePanel();
+      }
+    }
+  });
+
+  const minimizePanel = () => {
+    refreshAccountAvatar();
+    const btnRect = $("minimizeBtn").getBoundingClientRect();
+    fabX = Math.max(0, Math.min(window.innerWidth - fab.offsetWidth, btnRect.left + (btnRect.width / 2) - (fab.offsetWidth / 2)));
+    fabY = Math.max(0, Math.min(window.innerHeight - fab.offsetHeight, btnRect.top + (btnRect.height / 2) - (fab.offsetHeight / 2)));
+    
+    fab.style.transform = `translate3d(${fabX}px, ${fabY}px, 0) scale(0.3)`;
+    fab.style.display = "block";
+    
+    requestAnimationFrame(() => {
+      fab.style.transition = "transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275), width 0.2s, height 0.2s";
+      fab.style.transform = `translate3d(${fabX}px, ${fabY}px, 0) scale(1)`;
+      setTimeout(() => { fab.style.transition = "width 0.2s, height 0.2s"; }, 200);
+    });
+    
+    panel.style.display = "none";
+    log("Minimized. Double-click icon to open.", "info");
+  };
+
+  const maximizePanel = () => {
+    fab.style.display = "none";
+    panel.style.display = "flex";
+    
+    panelX = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, fabX - panel.offsetWidth / 2));
+    panelY = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, fabY - 20));
+    
+    panel.style.transform = `translate3d(${panelX}px, ${panelY}px, 0) scale(0.85)`;
+    panel.style.opacity = "0";
+    
+    requestAnimationFrame(() => {
+      panel.style.transition = "transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 0.25s ease";
+      panel.style.transform = `translate3d(${panelX}px, ${panelY}px, 0) scale(1)`;
+      panel.style.opacity = "1";
+      setTimeout(() => { panel.style.transition = ""; }, 250);
+    });
+  };
+
+  const log = (msg, type = "info") => {
+    const el = document.createElement("div");
+    el.className = "log-entry " + type;
+    el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logEl.appendChild(el);
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+
+  // --- Settings Logic ---
+  $("settingsBtn").addEventListener("click", () => $("settingsModal").classList.add("show"));
+  $("closeSettings").addEventListener("click", () => $("settingsModal").classList.remove("show"));
+
+  // Color Picker (Wheel)
+  $("colorPicker").addEventListener("input", (e) => {
+    const color = e.target.value;
+    settings.theme = color;
+    panel.style.setProperty('--accent-color', color);
+    fab.style.setProperty('--accent-color', color);
+  });
+
+  // Panel Size
+  $("panelSize").addEventListener("input", (e) => {
+    settings.size = e.target.value;
+    $("sizeVal").textContent = settings.size;
+    panel.style.width = `${settings.size}px`;
+  });
+
+  // Icon Size
+  $("fabSize").addEventListener("input", (e) => {
+    settings.fabSize = e.target.value;
+    $("fabSizeVal").textContent = settings.fabSize;
+    fab.style.width = `${settings.fabSize}px`;
+    fab.style.height = `${settings.fabSize}px`;
+  });
+
+  // --- Custom Modal Logic ---
+  const closeModalOverlay = $("closeModalOverlay");
+  
+  $("closeBtn").addEventListener("click", () => closeModalOverlay.classList.add("show"));
+  $("modalCancel").addEventListener("click", () => closeModalOverlay.classList.remove("show"));
+  $("modalConfirm").addEventListener("click", () => {
+    closeModalOverlay.classList.remove("show");
+    activeJobs.forEach((job, id) => stopJob(id));
+    root.remove();
+  });
+
+  // --- Logic ---
+  const getEligibleQuests = () => {
+    try {
+      return [...QuestsStore.quests.values()].filter(q => {
+        if (!q || !q.userStatus || !q.config) return false;
+        if (!q.userStatus.enrolledAt || q.userStatus.completedAt) return false;
+        if (new Date(q.config.expiresAt).getTime() <= Date.now()) return false;
+        
+        const taskKeys = Object.keys((q.config.taskConfig || q.config.taskConfigV2).tasks || {});
+        if (!supportedTasks.some(t => taskKeys.includes(t))) return false;
+        return true;
+      });
+    } catch { return []; }
+  };
+
+  const getQuestTask = (quest) => {
+    const tc = quest.config?.taskConfig ?? quest.config?.taskConfigV2;
+    if (!tc || !tc.tasks) return null;
+    const taskName = supportedTasks.find(t => tc.tasks[t] != null);
+    return taskName ? { taskName, taskData: tc.tasks[taskName] } : null;
+  };
+
+  const getQuestProgress = (quest) => {
+    try {
+      const t = getQuestTask(quest); if (!t) return { current: 0, target: 0 };
+      const live = QuestsStore.quests.get(quest.id) ?? quest;
+      const status = live.userStatus;
+      if (!status) return { current: 0, target: 0 };
+      const current = live.config?.configVersion === 1
+        ? (status.streamProgressSeconds ?? 0)
+        : (status.progress?.[t.taskName]?.value ?? 0);
+      return { current: Math.floor(current), target: t.taskData?.target || 0 };
+    } catch { return { current: 0, target: 0 }; }
+  };
+
+  const formatTime = (seconds) => {
+    if (seconds < 60) return `${Math.floor(seconds)}s`;
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}m ${s}s`;
+  };
+
+  const render = () => {
+    const quests = getEligibleQuests();
+    $("fabBadge").textContent = quests.length > 0 ? quests.length : "";
+    
+    if (quests.length === 0) {
+      listEl.innerHTML = `<div style="text-align:center; color:#949ba4; padding:20px;">No active quests found.</div>`;
+      return;
+    }
+    
+    listEl.innerHTML = quests.map(q => {
+      const t = getQuestTask(q); if (!t) return "";
+      const color = q.config.taskConfig?.tasks?.WATCH_VIDEO ? "#ff9f43" : 
+                    q.config.taskConfig?.tasks?.PLAY_ON_DESKTOP ? "#1dd1a1" :
+                    q.config.taskConfig?.tasks?.STREAM_ON_DESKTOP ? "#a55eea" :
+                    q.config.taskConfig?.tasks?.PLAY_ACTIVITY ? "#54a0ff" : "#5865f2";
+      
+      const qName = q.config.messages?.questName || q.id;
+      const isChecked = selectedQuests.has(q.id) ? "checked" : "";
+      
+      const { current, target } = getQuestProgress(q);
+      const pct = target > 0 ? Math.min(100, (current / target) * 100) : 0;
+      const isRunning = activeJobs.has(q.id);
+
+      return `<div class="quest" style="--quest-color: ${color}" data-id="${q.id}">
+        <div class="quest-main">
+          <input type="checkbox" data-id="${q.id}" ${isChecked}>
+          <div class="quest-info">
+            <div class="quest-title">
+              <span class="quest-name">${qName}</span>
+              <span class="task-badge">${t.taskName.replace(/_/g, " ")}</span>
+            </div>
+          </div>
+        </div>
+        <div class="progress-container">
+          <div class="progress-text">
+            <span>${formatTime(current)} / ${formatTime(target)}</span>
+            <span>${isRunning ? "Running..." : ""}</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" style="width: ${pct}%; ${isRunning ? '' : 'background: #5865f2; box-shadow: none;'}"></div>
+          </div>
+        </div>
+      </div>`;
+    }).join("");
+
+    listEl.querySelectorAll(".quest-main").forEach(el => {
+      el.addEventListener("click", (e) => {
+        if (e.target.tagName === "INPUT") return; 
+        const id = el.parentElement.dataset.id;
+        const cb = el.querySelector("input[type=checkbox]");
+        cb.checked = !cb.checked;
+        if (cb.checked) selectedQuests.add(id);
+        else selectedQuests.delete(id);
+      });
+    });
+
+    listEl.querySelectorAll("input[type=checkbox]").forEach(cb => {
+      cb.addEventListener("change", (e) => {
+        const id = e.target.dataset.id;
+        if (e.target.checked) selectedQuests.add(id);
+        else selectedQuests.delete(id);
+      });
+    });
+  };
+
+  // --- Real Quest Logic (Spoofing) ---
+  const activeFakeGames = new Set();
+  let realGetRunningGames = null, realGetGameForPID = null, spoofActive = false;
+
+  const ensureSpoof = () => {
+    if (spoofActive) return;
+    realGetRunningGames = RunningGameStore.getRunningGames.bind(RunningGameStore);
+    realGetGameForPID   = RunningGameStore.getGameForPID.bind(RunningGameStore);
+    RunningGameStore.getRunningGames = () => [...realGetRunningGames(), ...activeFakeGames];
+    RunningGameStore.getGameForPID   = (pid) => [...activeFakeGames].find(x => x.pid === pid) ?? realGetGameForPID(pid);
+    spoofActive = true;
+  };
+  
+  const refreshGames = (added = [], removed = []) => {
+    FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed, added, games: [...activeFakeGames] });
+  };
+  
+  const addFake = (g) => { ensureSpoof(); activeFakeGames.add(g); refreshGames([g]); };
+  const removeFake = (g) => {
+    activeFakeGames.delete(g); refreshGames([], [g]);
+    if (activeFakeGames.size === 0 && spoofActive) {
+      RunningGameStore.getRunningGames = realGetRunningGames;
+      RunningGameStore.getGameForPID   = realGetGameForPID;
+      spoofActive = false;
+      FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [], added: [], games: [] });
+    }
+  };
+
+  const runJob = (quest) => {
+    if (activeJobs.has(quest.id)) return;
+    const t = getQuestTask(quest); if (!t) return;
+    const { taskName, taskData } = t;
+    const applicationId = quest.config.application?.id ?? taskData.applications?.[0]?.id;
+    const secondsNeeded = taskData.target;
+    const questName = quest.config.messages?.questName ?? quest.id;
+    const pid = Math.floor(Math.random() * 30000) + 1000;
+    
+    const state = { aborted: false, cleanup: () => {} };
+    activeJobs.set(quest.id, state);
+
+    const finish = (ok = true) => {
+      activeJobs.delete(quest.id);
+      if (ok) { log(`✅ Completed: ${questName}`, "success"); }
+      render();
+    };
+
+    if (taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
+      let secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
+      const speed = 10; 
+      let completed = false;
+      
+      (async () => {
+        while (!state.aborted) {
+          const remaining = Math.min(speed, secondsNeeded - secondsDone);
+          if (remaining <= 0) break;
+          await new Promise(r => setTimeout(r, remaining * 1000 + (Math.random() * 1000 - 500)));
+          if (state.aborted) return;
+          try {
+            const res = await api.post({ url: `/quests/${quest.id}/video-progress`,
+              body: { timestamp: Math.min(secondsNeeded, secondsDone + speed + Math.random()) } });
+            completed = res.body?.completed_at != null;
+            secondsDone = Math.min(secondsNeeded, secondsDone + speed);
+          } catch (e) { log(`Video error: ${e.message}`, "error"); }
+          if (secondsDone >= secondsNeeded) break;
+          render();
+        }
+        if (!state.aborted && !completed) {
+          try { await api.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: secondsNeeded } }); } catch {}
+        }
+        if (!state.aborted) finish(true);
+      })();
+      log(`▶ Video started: ${questName}`, "info");
+      state.cleanup = () => { state.aborted = true; };
+      return;
+    }
+
+    if (taskName === "PLAY_ON_DESKTOP") {
+      if (!isApp) { log(`❌ ${questName}: needs Discord desktop app.`, "error"); activeJobs.delete(quest.id); return; }
+      api.get({ url: `/applications/public?application_ids=${applicationId}` }).then(res => {
+        if (state.aborted) return;
+        const appData = res.body[0];
+        const exeName = appData.executables?.find(x => x.os === "win32")?.name?.replace(">", "") ?? appData.name.replace(/[\/\\:*?"<>|]/g, "");
+        const fakeGame = {
+          cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`, exeName,
+          exePath: `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
+          hidden: false, isLauncher: false, id: applicationId, name: appData.name,
+          pid, pidPath: [pid], processName: appData.name, start: Date.now(),
+        };
+        addFake(fakeGame);
+        
+        const onBeat = (data) => {
+          if (state.aborted) return;
+          const p = data.userStatus?.progress?.PLAY_ON_DESKTOP?.value ?? 0;
+          render();
+          if (p >= secondsNeeded) {
+            FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", onBeat);
+            removeFake(fakeGame);
+            finish(true);
+          }
+        };
+        FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", onBeat);
+        state.cleanup = () => {
+          FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", onBeat);
+          removeFake(fakeGame);
+        };
+        log(`▶ Game spoofed: ${appData.name}`, "info");
+      }).catch(e => { log(`Fetch app error: ${e.message}`, "error"); activeJobs.delete(quest.id); });
+      return;
+    }
+
+    if (taskName === "STREAM_ON_DESKTOP") {
+      if (!isApp) { log(`❌ ${questName}: needs Discord desktop app.`, "error"); activeJobs.delete(quest.id); return; }
+      if ([...activeJobs.values()].some(j => j._isStream)) {
+        log(`⚠ Only one STREAM quest at a time.`, "warn");
+        activeJobs.delete(quest.id); return;
+      }
+      state._isStream = true;
+      const realMeta = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
+      ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({ id: applicationId, pid, sourceName: null });
+      
+      const onBeat = (data) => {
+        if (state.aborted) return;
+        const p = data.userStatus?.progress?.STREAM_ON_DESKTOP?.value ?? 0;
+        render();
+        if (p >= secondsNeeded) {
+          FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", onBeat);
+          ApplicationStreamingStore.getStreamerActiveStreamMetadata = realMeta;
+          finish(true);
+        }
+      };
+      FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", onBeat);
+      state.cleanup = () => {
+        FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", onBeat);
+        ApplicationStreamingStore.getStreamerActiveStreamMetadata = realMeta;
+      };
+      log(`▶ Stream spoofed: ${questName}`, "info");
+      return;
+    }
+
+    if (taskName === "PLAY_ACTIVITY") {
+      let channelId = ChannelStore.getSortedPrivateChannels()[0]?.id;
+      if (!channelId) {
+        const g = Object.values(GuildChannelStore.getAllGuilds()).find(x => x?.VOCAL?.length > 0);
+        channelId = g?.VOCAL[0]?.channel?.id;
+      }
+      if (!channelId) { log(`❌ ${questName}: no voice channel found.`, "error"); activeJobs.delete(quest.id); return; }
+      const streamKey = `call:${channelId}:1`;
+      
+      (async () => {
+        log(`▶ Activity started: ${questName}`, "info");
+        while (!state.aborted) {
+          try {
+            const res = await api.post({ url: `/quests/${quest.id}/heartbeat`, body: { stream_key: streamKey, terminal: false } });
+            const p = res.body?.progress?.PLAY_ACTIVITY?.value ?? 0;
+            render();
+            if (p >= secondsNeeded) {
+              await api.post({ url: `/quests/${quest.id}/heartbeat`, body: { stream_key: streamKey, terminal: true } });
+              break;
+            }
+          } catch (e) { log(`Activity error: ${e.message}`, "error"); }
+          await new Promise(r => setTimeout(r, 20000 + (Math.random() * 2000 - 1000)));
+        }
+        if (!state.aborted) finish(true);
+      })();
+      state.cleanup = () => { state.aborted = true; };
+      return;
+    }
+  };
+
+  const stopJob = (id) => {
+    const j = activeJobs.get(id); if (!j) return;
+    j.cleanup(); j.aborted = true; activeJobs.delete(id);
+    log(`■ Stopped job.`, "warn");
+    render();
+  };
+
+  setInterval(render, 2000);
+  render();
+
+  // --- Buttons ---
+  $("minimizeBtn").addEventListener("click", minimizePanel);
+  
+  $("startSelected").addEventListener("click", () => {
+    if (selectedQuests.size === 0) return log("No quests selected!", "warn");
+    log(`Starting ${selectedQuests.size} selected quest(s)...`, "success");
+    selectedQuests.forEach(id => {
+      const q = QuestsStore.quests.get(id);
+      if (q) runJob(q);
+    });
+    render();
+  });
+
+  $("startAll").addEventListener("click", () => {
+    const quests = getEligibleQuests();
+    if (quests.length === 0) return log("No quests found.", "info");
+    log(`Starting all ${quests.length} quests...`, "success");
+    quests.forEach(q => runJob(q));
+    render();
+  });
+
+  $("stopAll").addEventListener("click", () => {
+    activeJobs.forEach((job, id) => stopJob(id));
+    log("Stopped all running tasks.", "info");
+    render();
+  });
+
+  log(`Quest Manager v${VERSION} loaded.`, "success");
+  log("Double-click minimized icon to restore.", "info");
+})();
