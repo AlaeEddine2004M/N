@@ -1148,4 +1148,132 @@
     while (Date.now() - start < maxWait) {
       const q = QuestsStore.quests.get(questId);
       if (q?.userStatus?.enrolledAt) return q;
-      await new Promise(r => setT... (5 KB left)
+      await new Promise(r => setTimeout(r, 200));
+    }
+    const q = QuestsStore.quests.get(questId);
+    if (q) {
+      q.userStatus = { ...(q.userStatus || {}), enrolledAt: new Date().toISOString() };
+      return q;
+    }
+    return null;
+  };
+
+  const handleEnrollAndUpdate = async () => {
+    const unenrolled = getUnenrolledQuests();
+    
+    if (!unenrolled.length) {
+      log("No new quests available to enroll.", "info");
+      return;
+    }
+
+    const btnUpd = $("updateBtn");
+    btnUpd.disabled = true;
+    btnUpd.textContent = `⟳ Loading...`;
+
+    const total = unenrolled.length;
+    let enrolledCount = 0, playedCount = 0;
+
+    for (const q of unenrolled) {
+      const qName = q.config?.messages?.questName || q.id;
+      try {
+        await api.post({
+          url: `/quests/${q.id}/enroll`,
+          body: { location: 11, is_targeted: false, metadata_raw: null }
+        });
+        enrolledCount++;
+        log(`✅ Enrolled: ${qName}`, "success");
+
+        const fresh = await waitForEnroll(q.id, 5000);
+        if (fresh && !activeJobs.has(fresh.id)) {
+          runJob(fresh);
+          playedCount++;
+          log(`▶ Auto-Play Started: ${qName}`, "info");
+        }
+      } catch (e) {
+        log(`❌ Failed to enroll ${qName}: ${e.message}`, "error");
+      }
+      await new Promise(r => setTimeout(r, 800));
+    }
+
+    btnUpd.disabled = false;
+    btnUpd.textContent = "⟳ Update";
+    log(`[DONE] ${enrolledCount}/${total} new quests enrolled, ${playedCount} started.`, "success");
+    render();
+  };
+
+  // --- GitHub Auto-Updater (Runs when clicked) ---
+  const extractRemoteMeta = (text) => {
+    const versionMatch = text.match(/(?:const|let|var)\s+VERSION\s*=\s*["']([^"']+)["']/);
+    return { version: versionMatch?.[1] || null };
+  };
+  
+  const parseVersion = (v) => {
+    if (!v) return null;
+    const m = String(v).trim().replace(/^v/i, "").match(/^(\d+)\.(\d+)\.(\d+)/);
+    return m ? { major: +m[1], minor: +m[2], patch: +m[3] } : null;
+  };
+  
+  const cmpVersion = (a, b) => {
+    const va = parseVersion(a), vb = parseVersion(b);
+    if (!va || !vb) return 0;
+    if (va.major !== vb.major) return va.major - vb.major;
+    if (va.minor !== vb.minor) return va.minor - vb.minor;
+    return va.patch - vb.patch;
+  };
+
+  const checkUpdateFromGitHub = async () => {
+    if (!confirm("Do you want to check for a new version of Quest Manager on GitHub?")) return;
+    
+    const btnUpd = $("updateBtn");
+    btnUpd.textContent = "⟳ Checking GitHub...";
+    btnUpd.disabled = true;
+
+    try {
+      const url = GITHUB_RAW_URL + "?t=" + Date.now(); // كسر الـ Cache
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      
+      const text = await res.text();
+      const meta = extractRemoteMeta(text);
+      
+      if (!meta.version) throw new Error("Remote VERSION not found.");
+      
+      const cmp = cmpVersion(meta.version, VERSION);
+      if (cmp <= 0) {
+        log("✅ Already up to date with GitHub.", "success");
+        alert("You are already on the latest version.");
+      } else {
+        if (confirm(`New version v${meta.version} found on GitHub. Update now?`)) {
+          window.dispatchEvent(new Event("dc-quest-manager-cleanup"));
+          await new Promise(r => setTimeout(r, 200));
+          new Function(text)();
+          log(`✅ Updated to v${meta.version} successfully!`, "success");
+          return;
+        }
+      }
+    } catch (e) {
+      log(`Update error: ${e.message}`, "error");
+      alert("Failed to check for updates from GitHub.\n" + e.message);
+    } finally {
+      btnUpd.disabled = false;
+      btnUpd.textContent = "⟳ Update";
+    }
+  };
+
+  setInterval(render, 2000);
+  render();
+
+  // --- Buttons ---
+  $("minimizeBtn").addEventListener("click", minimizePanel);
+
+  window.addEventListener("dc-quest-manager-cleanup", () => {
+    clearInterval(renderInterval);
+    activeJobs.forEach((job, id) => stopJob(id));
+    root.remove();
+  });
+
+  const renderInterval = setInterval(render, 2000);
+  render();
+
+  log(`Quest Manager v${VERSION} loaded.`, "success");
+})();
